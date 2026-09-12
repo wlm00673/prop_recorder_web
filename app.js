@@ -94,7 +94,9 @@
   const LS = { records: 'prop_records_v1', motors: 'prop_motors_v1', escs: 'prop_escs_v1' };
 
   /* ============================================================
-   *  存储
+   *  存储：默认保存到本机浏览器；
+   *  若 config.js 里填了 Supabase，则改为「云端共享数据库」，
+   *  所有人打开网页读写的是同一份数据。
    * ============================================================ */
   const store = {
     load(key, fallback) {
@@ -109,11 +111,70 @@
     }
   };
 
-  let records = store.load(LS.records, []);
+  const CFG = Object.assign(
+    { TABLE: 'prop_records' },
+    (typeof window !== 'undefined' && window.PROP_CONFIG) || {}
+  );
+  const CLOUD = !!(CFG.SUPABASE_URL && CFG.SUPABASE_ANON_KEY);
+  let cloudError = '';
+
+  function apiUrl(query) {
+    const base = String(CFG.SUPABASE_URL || '').replace(/\/+$/, '');
+    return base + '/rest/v1/' + encodeURIComponent(CFG.TABLE) + (query || '');
+  }
+  function apiHeaders(extra) {
+    const key = String(CFG.SUPABASE_ANON_KEY || '');
+    const h = {
+      apikey: key,
+      'Content-Type': 'application/json'
+    };
+    // 旧版 key 是 JWT（eyJ 开头），需要同时放进 Authorization；
+    // 新版 publishable key（sb_publishable_...）只放 apikey 即可。
+    if (key.indexOf('eyJ') === 0) h.Authorization = 'Bearer ' + key;
+    return Object.assign(h, extra || {});
+  }
+  async function apiCheck(res) {
+    if (!res.ok) {
+      let detail = '';
+      try { detail = String(await res.text()).slice(0, 180); } catch (e) { /* ignore */ }
+      throw new Error('HTTP ' + res.status + (detail ? '：' + detail : ''));
+    }
+  }
+  async function cloudList() {
+    const res = await fetch(apiUrl('?select=id,record_id,created_at,data&order=id.asc'), { headers: apiHeaders() });
+    await apiCheck(res);
+    const rows = await res.json();
+    return rows.map(r => Object.assign({}, r.data, { _dbId: r.id }));
+  }
+  async function cloudInsert(rec) {
+    const res = await fetch(apiUrl(), {
+      method: 'POST',
+      headers: apiHeaders({ Prefer: 'return=minimal' }),
+      body: JSON.stringify([{ record_id: rec['记录ID'], data: rec }])
+    });
+    await apiCheck(res);
+  }
+  async function cloudDelete(recordId) {
+    const res = await fetch(apiUrl('?record_id=eq.' + encodeURIComponent(recordId)), {
+      method: 'DELETE',
+      headers: apiHeaders({ Prefer: 'return=minimal' })
+    });
+    await apiCheck(res);
+  }
+  async function cloudClearAll() {
+    const res = await fetch(apiUrl('?id=gt.0'), {
+      method: 'DELETE',
+      headers: apiHeaders({ Prefer: 'return=minimal' })
+    });
+    await apiCheck(res);
+  }
+
+  let records = CLOUD ? [] : store.load(LS.records, []);
   let customMotors = store.load(LS.motors, []);
   let customEscs = store.load(LS.escs, []);
 
   function persistRecords() {
+    if (CLOUD) return; // 云端模式：记录只存云端，避免两边不一致
     if (!store.save(LS.records, records)) toast('浏览器存储写入失败（可能是隐私模式或空间已满）', true);
   }
   function persistMotors() { store.save(LS.motors, customMotors); }
@@ -281,7 +342,7 @@
     };
   }
 
-  function saveRecord() {
+  async function saveRecord() {
     const thrust = valueOrNull('thrust');
     if (thrust === null || thrust <= 0) {
       toast('请先填写「螺旋桨拉力 (kg)」', true);
@@ -289,11 +350,23 @@
       return;
     }
     const rec = buildRecord();
+    if (CLOUD) {
+      try {
+        await cloudInsert(rec);
+        cloudError = '';
+      } catch (e) {
+        cloudError = '云端保存失败：' + e.message;
+        updateModeBadge();
+        toast('云端保存失败：' + e.message, true);
+        return;
+      }
+    }
     records.push(rec);
     rememberMotor(rec);
     rememberEsc(rec);
     persistRecords();
     renderAll();
+    updateModeBadge();
     ['thrust', 'current', 'rpm', 'voltage', 'throttle', 'temp'].forEach(id => { $(id).value = ''; });
     $('thrust').focus();
     toast(`已保存 ${rec['记录ID']} ｜ ${rec['规格']} ｜ ${thrust} kg`);
@@ -479,12 +552,11 @@
 
   function importJson(file) {
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       try {
         const data = JSON.parse(reader.result);
         const incoming = Array.isArray(data) ? data : (data.records || []);
         if (!incoming.length) { toast('文件里没有记录', true); return; }
-        records = records.concat(incoming);
         if (Array.isArray(data.customMotors)) {
           data.customMotors.forEach(m => {
             if (!allMotors().some(x => x.brand === m.brand && x.model === m.model)) customMotors.push(m);
@@ -497,9 +569,21 @@
           });
           persistEscs();
         }
-        persistRecords();
-        renderAll();
-        toast(`已导入 ${incoming.length} 条记录`);
+        if (CLOUD) {
+          // 云端模式：逐条上传到云端（也用于把本机老数据迁移到共享库）
+          let done = 0, fail = 0;
+          for (let i = 0; i < incoming.length; i++) {
+            try { await cloudInsert(incoming[i]); done++; }
+            catch (e) { fail++; }
+          }
+          await refreshFromCloud(false);
+          toast(`已导入到云端 ${done} 条` + (fail ? `，${fail} 条失败` : ''), fail > 0);
+        } else {
+          records = records.concat(incoming);
+          persistRecords();
+          renderAll();
+          toast(`已导入 ${incoming.length} 条记录`);
+        }
       } catch (err) {
         toast('导入失败：不是有效的 JSON 备份文件', true);
       }
@@ -757,6 +841,59 @@
   }
 
   /* ============================================================
+   *  云端共享：拉取 / 状态显示
+   * ============================================================ */
+  async function refreshFromCloud(showTip) {
+    if (!CLOUD) { renderAll(); updateModeBadge(); return; }
+    try {
+      records = await cloudList();
+      cloudError = '';
+      if (showTip) toast(`已刷新，云端共 ${records.length} 条记录`);
+    } catch (e) {
+      cloudError = '云端连接失败：' + e.message;
+      if (showTip) toast('云端刷新失败：' + e.message, true);
+    }
+    renderAll();
+    updateModeBadge();
+  }
+
+  function updateModeBadge() {
+    const badge = $('modeBadge');
+    if (badge) {
+      if (!CLOUD) {
+        badge.textContent = '本机保存';
+        badge.className = 'badge';
+      } else if (cloudError) {
+        badge.textContent = '云端共享（连接异常）';
+        badge.className = 'badge err';
+      } else {
+        badge.textContent = `云端共享 · ${records.length} 条`;
+        badge.className = 'badge cloud';
+      }
+    }
+    const banner = $('cloudBanner');
+    if (banner) {
+      if (CLOUD && cloudError) {
+        banner.hidden = false;
+        banner.className = 'banner err';
+        banner.textContent = cloudError + '　—　请检查 config.js 里的 Supabase 配置或网络，然后点「刷新」重试。';
+      } else {
+        banner.hidden = true;
+      }
+    }
+    const hint = $('storageHint');
+    if (hint) {
+      hint.innerHTML = CLOUD
+        ? '当前是 <b>云端共享模式</b>：所有人打开这个网页看到的都是<b>同一份数据</b>，'
+          + '页面每 60 秒自动刷新，也可以点右上角「刷新」立即同步。'
+          + '数据存在你的 Supabase 项目里，建议定期点「导出 JSON 备份」留底。'
+        : '数据保存在<b>你本机浏览器</b>里（localStorage），不会上传到任何服务器。'
+          + '换电脑、换浏览器、清理浏览器数据都会丢失，请定期点「导出 JSON 备份」或「导出 Excel」留存。'
+          + '别人打开这个网页看到的是<b>他自己</b>的数据 —— 想让大家共享同一份，按 README 配置 Supabase 即可。';
+    }
+  }
+
+  /* ============================================================
    *  事件绑定 / 初始化
    * ============================================================ */
   function init() {
@@ -768,6 +905,13 @@
     refreshEscOptions();
     refreshFilterOptions();
     renderAll();
+    updateModeBadge();
+
+    if ($('refreshBtn')) $('refreshBtn').addEventListener('click', () => refreshFromCloud(true));
+    if (CLOUD) {
+      refreshFromCloud(false);
+      setInterval(() => { if (!document.hidden) refreshFromCloud(false); }, 60000);
+    }
 
     $('usage').addEventListener('change', refreshSizeOptions);
     $('sizeSel').addEventListener('change', e => applySize(e.target.value));
@@ -795,23 +939,33 @@
       renderRecords();
     });
 
-    $('recordsBody').addEventListener('click', e => {
+    $('recordsBody').addEventListener('click', async e => {
       const btn = e.target.closest('button.del');
       if (!btn) return;
       const id = btn.dataset.id;
       if (!confirm(`确定删除记录 ${id} 吗？`)) return;
+      if (CLOUD) {
+        try { await cloudDelete(id); cloudError = ''; }
+        catch (err) { cloudError = '云端删除失败：' + err.message; updateModeBadge(); toast(cloudError, true); return; }
+      }
       records = records.filter(r => r['记录ID'] !== id);
       persistRecords();
       renderAll();
+      updateModeBadge();
       toast(`已删除 ${id}`);
     });
 
-    $('dangerClear').addEventListener('click', () => {
+    $('dangerClear').addEventListener('click', async () => {
       if (!records.length) { toast('没有记录可清空', true); return; }
       if (!confirm(`确定清空全部 ${records.length} 条记录吗？此操作不可恢复，建议先导出备份。`)) return;
+      if (CLOUD) {
+        try { await cloudClearAll(); cloudError = ''; }
+        catch (err) { cloudError = '云端清空失败：' + err.message; updateModeBadge(); toast(cloudError, true); return; }
+      }
       records = [];
       persistRecords();
       renderAll();
+      updateModeBadge();
       toast('已清空全部记录');
     });
 

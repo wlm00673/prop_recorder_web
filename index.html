@@ -11,10 +11,12 @@
   <header>
     <div class="tag">PROPELLER TEST TOOL</div>
     <h1>螺旋桨测试数据记录器</h1>
-    <p>录入拉力测试数据 · 自动保存到本机 · 一键导出 Excel</p>
+    <p>录入拉力测试数据 · 支持云端共享 · 一键导出 Excel</p>
   </header>
 
   <main>
+    <div id="cloudBanner" class="banner err" hidden></div>
+
     <!-- ============ ① 录入 ============ -->
     <section class="card">
       <h2>① 录入测试数据</h2>
@@ -110,7 +112,13 @@
 
     <!-- ============ ② 记录列表 ============ -->
     <section class="card">
-      <h2>② 记录列表</h2>
+      <div class="card-head">
+        <h2>② 记录列表</h2>
+        <div class="card-head-actions">
+          <span id="modeBadge" class="badge">本机保存</span>
+          <button id="refreshBtn" class="btn small ghost">刷新</button>
+        </div>
+      </div>
 
       <div class="stats">
         <div class="stat"><em id="statTotal">0</em><span>记录总数</span></div>
@@ -162,10 +170,10 @@
         <label class="btn file-btn">导入 JSON 备份<input id="importJson" type="file" accept=".json" hidden></label>
         <button id="dangerClear" class="btn danger">清空全部记录</button>
       </div>
-      <p class="hint">
+      <p class="hint" id="storageHint">
         数据保存在<b>你本机浏览器</b>里（localStorage），不会上传到任何服务器。
         换电脑、换浏览器、清理浏览器数据都会丢失，请定期点「导出 JSON 备份」或「导出 Excel」留存。
-        别人打开这个网页看到的是<b>他自己</b>的数据。
+        别人打开这个网页看到的是<b>他自己</b>的数据 —— 想让大家共享同一份，按 README 配置 Supabase 即可。
       </p>
     </section>
 
@@ -223,6 +231,7 @@
 </div>
 
 <div id="toast" class="toast"></div>
+<script src="config.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
