@@ -21,7 +21,7 @@ window.PROP_CONFIG = {
    * 旧版：eyJ...（很长的 JWT，叫 anon public）
    * 两种都支持，直接整串粘贴。千万别填 sb_secret_... / service_role（那是管理员密钥）
    * ────────────────────────────────────────────────────────── */
-  SUPABASE_ANON_KEY: '',
+  SUPABASE_ANON_KEY: 'sb_publishable_ELfnHcE655VoggHjhXKRTA_SH-17ZuY',
 
   /* 数据表名（按 supabase_setup.sql 建的表就叫 prop_records） */
   TABLE: 'prop_records'
